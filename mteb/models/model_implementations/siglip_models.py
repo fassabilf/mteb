@@ -26,6 +26,13 @@ SIGLIP_CITATION = """@misc{zhai2023sigmoid,
       primaryClass={cs.CV}
 }"""
 
+SIGLIP2_CITATION = """@misc{tschannen2025siglip2,
+      title={SigLIP 2: Multilingual Vision-Language Encoders with Better Semantic Understanding, Localization, and Dense Features}, 
+      author={Michael Tschannen and others},
+      year={2025},
+      url={https://huggingface.co/blog/siglip2}
+}"""
+
 def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Custom collate to handle sparse data (NoneType) and PIL images within batches.
@@ -478,4 +485,29 @@ siglip_large_patch16_384 = ModelMeta(
     use_instructions=False,
     training_datasets=siglip_training_datasets,
     citation=SIGLIP_CITATION,
+)
+
+siglip2_so400m_patch16_naflex = ModelMeta(
+    loader=SiglipModelWrapper,
+    name="google/siglip2-so400m-patch16-naflex", 
+    model_type=["dense"],
+    languages=["eng-Latn"], 
+    revision="main",
+    release_date="2025-02-21",
+    modalities=["image", "text"],
+    n_parameters=400000000,
+    n_embedding_parameters=36864000,
+    memory_usage_mb=1600, 
+    max_tokens=64,
+    embed_dim=1152,
+    license="apache-2.0",
+    open_weights=True,
+    public_training_code="https://github.com/huggingface/transformers",
+    public_training_data=None,
+    framework=["PyTorch", "Transformers", "safetensors"],
+    reference="https://huggingface.co/google/siglip2-so400m-patch16-naflex",
+    similarity_fn_name=ScoringFunction.COSINE,
+    use_instructions=False,
+    training_datasets=siglip_training_datasets,
+    citation=SIGLIP2_CITATION,
 )
