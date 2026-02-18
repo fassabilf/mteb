@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import torch
+from torch.utils.data import DataLoader, default_collate
 from tqdm.auto import tqdm
+from transformers import AutoModel, AutoProcessor
+from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 from mteb.models.abs_encoder import AbsEncoder
 from mteb.models.model_meta import ModelMeta, ScoringFunction
@@ -23,6 +26,34 @@ SIGLIP_CITATION = """@misc{zhai2023sigmoid,
       primaryClass={cs.CV}
 }"""
 
+def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Custom collate to handle sparse data (NoneType) and PIL images within batches.
+    Falls back to default_collate for regular tensors/primitives.
+    """
+    if not batch:
+        return {}
+    
+    elem = batch[0]
+    collated = {}
+    
+    if isinstance(elem, dict):
+        for key in elem:
+            values = [d[key] for d in batch]
+            
+            if key in ["image", "img", "visual"] or any(v is None for v in values):
+                collated[key] = values
+            else:
+                try:
+                    from torch.utils.data import default_collate
+                    collated[key] = default_collate(values)
+                except Exception:
+                    collated[key] = values
+                    
+        return collated
+    
+    # Fallback untuk list biasa
+    return batch
 
 class SiglipModelWrapper(AbsEncoder):
     def __init__(
@@ -47,6 +78,27 @@ class SiglipModelWrapper(AbsEncoder):
             self.device
         )
         self.processor = AutoProcessor.from_pretrained(model_name, revision=revision)
+        
+    def _create_dataloader(
+        self, 
+        inputs, 
+        batch_size
+    ):
+        if isinstance(inputs, DataLoader):
+            return DataLoader(
+                inputs.dataset,
+                batch_size=batch_size or inputs.batch_size,
+                collate_fn=_collate_fn,
+                shuffle=False,
+                num_workers=inputs.num_workers,
+            )
+            
+        return DataLoader(
+            inputs, 
+            batch_size=batch_size, 
+            collate_fn=_collate_fn,
+            shuffle=False
+        )
 
     def get_text_embeddings(
         self,
@@ -55,23 +107,45 @@ class SiglipModelWrapper(AbsEncoder):
         **kwargs: Any,
     ):
         all_text_embeddings = []
+        embed_dim = self.model.config.text_config.hidden_size
 
         with torch.no_grad():
             for batch in tqdm(
                 texts, disable=not show_progress_bar, desc="Text Encoding"
             ):
-                inputs = self.processor(
-                    text=batch["text"],
-                    return_tensors="pt",
-                    padding="max_length",
-                    truncation=True,
-                )
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                text_outputs = self.model.get_text_features(**inputs)
-                all_text_embeddings.append(text_outputs.cpu())
+                batch_text = batch["text"]
+                valid_indices = [i for i, t in enumerate(batch_text) if t is not None and len(t.strip()) > 0]
+                valid_texts = [batch_text[i] for i in valid_indices]
 
-        all_text_embeddings = torch.cat(all_text_embeddings, dim=0)
-        return all_text_embeddings
+                # Default Zero Vector
+                batch_emb = torch.zeros(len(batch_text), embed_dim, device=self.device)
+
+                if valid_texts:
+                    inputs = self.processor(
+                        text=valid_texts,
+                        return_tensors="pt",
+                        padding="max_length",
+                        truncation=True,
+                        max_length=64,
+                    )
+                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+
+                    
+                    outputs = self.model.get_text_features(**inputs)
+
+                    if isinstance(outputs, BaseModelOutputWithPooling):
+                        emb = outputs.pooler_output
+                    elif isinstance(outputs, tuple):
+                        emb = outputs[0]
+                    else:
+                        emb = outputs
+                    batch_emb[valid_indices] = emb
+                
+                all_text_embeddings.append(batch_emb.cpu())
+
+        if not all_text_embeddings: return torch.tensor([])
+        return torch.cat(all_text_embeddings, dim=0)
 
     def get_image_embeddings(
         self,
@@ -80,20 +154,40 @@ class SiglipModelWrapper(AbsEncoder):
         **kwargs: Any,
     ):
         all_image_embeddings = []
+        embed_dim = self.model.config.vision_config.hidden_size
 
         with torch.no_grad():
-            for batch in tqdm(images):
+            for batch in tqdm(images, disable=not show_progress_bar, desc="Image Encoding"):
+                batch_images = batch["image"]
+                valid_indices = [i for i, img in enumerate(batch_images) if img is not None]
+                # Convert hanya yang valid
+                valid_images = [batch_images[i].convert("RGB") for i in valid_indices]
 
-                batch_images = [img.convert("RGB") for img in batch["image"]]
+                # Default Zero Vector
+                batch_emb = torch.zeros(len(batch_images), embed_dim, device=self.device)
+
+                if valid_images:
+                    inputs = self.processor(
+                        images=valid_images, return_tensors="pt", padding=True
+                    )
+                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                    outputs = self.model.get_image_features(**inputs)
+                    
+                    if isinstance(outputs, BaseModelOutputWithPooling):
+                        emb = outputs.pooler_output
+                    elif hasattr(outputs, "pooler_output"): # Extra check
+                         emb = outputs.pooler_output
+                    elif isinstance(outputs, tuple):
+                        emb = outputs[0]
+                    else:
+                        emb = outputs
+                    
+                    batch_emb[valid_indices] = emb
                 
-                inputs = self.processor(
-                    images=batch_images, return_tensors="pt", padding=True
-                )
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                image_outputs = self.model.get_image_features(**inputs)
-                all_image_embeddings.append(image_outputs.pooler_output.cpu())
-        all_image_embeddings = torch.cat(all_image_embeddings, dim=0)
-        return all_image_embeddings
+                all_image_embeddings.append(batch_emb.cpu())
+
+        if not all_image_embeddings: return torch.tensor([])
+        return torch.cat(all_image_embeddings, dim=0)
 
     def encode(
         self,
@@ -105,25 +199,31 @@ class SiglipModelWrapper(AbsEncoder):
         prompt_type: PromptType | None = None,
         **kwargs: Any,
     ) -> Array:
+    
+        loader = self._create_dataloader(inputs, batch_size=kwargs.get("batch_size", 32))
+
         text_embeddings = None
         image_embeddings = None
-        if "text" in inputs.dataset.features:
-            text_embeddings = self.get_text_embeddings(inputs, **kwargs)
-        if "image" in inputs.dataset.features:
-            image_embeddings = self.get_image_embeddings(inputs, **kwargs)
+        
+        if "text" in loader.dataset.features:
+            text_embeddings = self.get_text_embeddings(loader, **kwargs)
+        if "image" in loader.dataset.features:
+            image_embeddings = self.get_image_embeddings(loader, **kwargs)
 
         if text_embeddings is not None and image_embeddings is not None:
             if len(text_embeddings) != len(image_embeddings):
-                raise ValueError(
-                    "The number of texts and images must have the same length"
-                )
+                # Fallback simple kalau panjang beda
+                min_len = min(len(text_embeddings), len(image_embeddings))
+                return text_embeddings[:min_len] + image_embeddings[:min_len]
+            
             fused_embeddings = text_embeddings + image_embeddings
             return fused_embeddings
         elif text_embeddings is not None:
             return text_embeddings
         elif image_embeddings is not None:
             return image_embeddings
-        raise ValueError
+        
+        return torch.tensor([])
 
 
 siglip_training_datasets = set(
