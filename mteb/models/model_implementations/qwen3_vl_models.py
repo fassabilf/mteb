@@ -215,6 +215,15 @@ class Qwen3VLEmbeddingWrapper(AbsEncoder):
     The model uses the Qwen3-VL vision-language architecture with a chat-template
     format for both queries and documents. Instructions are passed as system messages.
     """
+    @property
+    def abstask_prompt(self) -> str | None:
+        """Return the current task prompt for zero-shot classification and ordering tasks."""
+        return getattr(self, "_abstask_prompt", None)
+
+    @abstask_prompt.setter
+    def abstask_prompt(self, value: str | None) -> None:
+        self._abstask_prompt = value
+
 
     def __init__(
         self,
@@ -495,11 +504,10 @@ class Qwen3VLEmbeddingWrapper(AbsEncoder):
 
             with torch.inference_mode():
                 embeddings = self._encode_batch(text_batch, img_batch, instruction)
-            all_embeddings.append(embeddings.cpu())
+            all_embeddings.append(embeddings.cpu().float())
 
         all_embeddings = torch.cat(all_embeddings, dim=0)
         return all_embeddings
-
 
 # ---- Training datasets ----
 # Qwen3-VL-Embedding is trained on multimodal + text datasets

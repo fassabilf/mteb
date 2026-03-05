@@ -74,7 +74,18 @@ class RetrievalDatasetLoader:
         self.trust_remote_code = trust_remote_code
         self.split = split
         self.config = config if config != "default" else None
-        self.dataset_configs = get_dataset_config_names(self.hf_repo, self.revision)
+        try:
+            self.dataset_configs = get_dataset_config_names(
+                self.hf_repo,
+                revision=self.revision,
+                _require_default_config_name=False,
+            )
+        except TypeError:
+            # datasets versi lama tidak punya argumen ini
+            self.dataset_configs = get_dataset_config_names(
+                self.hf_repo,
+                revision=self.revision,
+            )
 
     def load(
         self,
@@ -133,13 +144,44 @@ class RetrievalDatasetLoader:
         config: str,
         num_proc: int | None,
     ) -> Dataset:
-        return load_dataset(
-            self.hf_repo,
-            config,
-            split=self._get_split(config),
-            trust_remote_code=self.trust_remote_code,
-            revision=self.revision,
-            num_proc=num_proc,
+        # Try requested config first, then common retrieval fallbacks
+        candidates = [config]
+
+        if config == "default":
+            candidates += ["qrels", "query", "queries", "corpus"]
+        elif config == "queries":
+            candidates += ["query"]
+        elif config == "query":
+            candidates += ["queries"]
+        elif config == "qrels":
+            candidates += ["default"]
+        elif config == "corpus":
+            candidates += ["default"]
+
+        # dedup preserving order
+        seen = set()
+        candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+        last_err = None
+        tried = []
+
+        for cfg in candidates:
+            tried.append(cfg)
+            try:
+                return load_dataset(
+                    self.hf_repo,
+                    cfg,
+                    split=self._get_split(cfg),
+                    trust_remote_code=self.trust_remote_code,
+                    revision=self.revision,
+                    num_proc=num_proc,
+                )
+            except Exception as e:
+                last_err = e
+
+        raise RuntimeError(
+            f"Failed loading {self.hf_repo} with requested config='{config}'. "
+            f"Tried={tried}, available={self.dataset_configs}. Last error={last_err}"
         )
 
     def _load_corpus(
@@ -165,9 +207,9 @@ class RetrievalDatasetLoader:
         config = f"{self.config}-queries" if self.config is not None else "queries"
         logger.info("Loading queries subset: %s", config)
 
-        if "query" in self.dataset_configs:
-            config = "query"
+        # Always let _load_dataset_split handle fallback queries<->query
         queries_ds = self._load_dataset_split(config, num_proc)
+
         if "_id" in queries_ds.column_names:
             queries_ds = queries_ds.cast_column("_id", Value("string")).rename_column(
                 "_id", "id"
@@ -182,20 +224,32 @@ class RetrievalDatasetLoader:
         self,
         num_proc: int | None,
     ) -> RelevantDocumentsType:
-        config = f"{self.config}-qrels" if self.config is not None else "default"
+        # Prefer explicit qrels; fallback to default
+        preferred = []
+        if self.config is not None:
+            preferred.append(f"{self.config}-qrels")
+        preferred += ["qrels", "default"]
 
-        logger.info("Loading qrels subset: %s", config)
-        if config == "default" and config not in self.dataset_configs:
-            if "qrels" in self.dataset_configs:
-                config = "qrels"
-            else:
-                raise ValueError(
-                    "No qrels or default config found. Please specify a valid config or ensure the dataset has qrels."
-                )
+        last_err = None
+        qrels_ds = None
+        chosen = None
+        for cfg in preferred:
+            try:
+                qrels_ds = self._load_dataset_split(cfg, num_proc)
+                chosen = cfg
+                break
+            except Exception as e:
+                last_err = e
 
-        qrels_ds = self._load_dataset_split(config, num_proc)
+        if qrels_ds is None:
+            raise RuntimeError(
+                f"Could not load qrels/default for {self.hf_repo}. "
+                f"Tried={preferred}. Last error={last_err}"
+            )
+
+        logger.info("Loading qrels subset: %s", chosen)
+
         qrels_ds = qrels_ds.select_columns(["query-id", "corpus-id", "score"])
-
         qrels_ds = qrels_ds.cast(
             Features(
                 {
@@ -207,7 +261,6 @@ class RetrievalDatasetLoader:
         )
 
         qrels_ds = qrels_ds.to_polars()
-        # filter queries with no qrels
         qrels_dict = {
             query_id[0]: dict(zip(group["corpus-id"], group["score"]))
             for query_id, group in qrels_ds.group_by("query-id", maintain_order=False)
