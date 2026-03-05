@@ -84,6 +84,7 @@ class AbsTaskZeroShotClassification(AbsTask):
 
     input_column_name: str = "image"
     label_column_name: str = "label"
+    abstask_prompt = "Classify the input into one of the given categories."
 
     def dataset_transform(self, num_proc: int | None = None, **kwargs: Any) -> None:
         """Keep only eval splits. Zero-shot tasks don't need train splits."""

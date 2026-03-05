@@ -79,6 +79,7 @@ class AbsTaskImageTextPairClassification(AbsTask):
     # it can be ["image_0", "image_1"]; ["text_0", "text_1"] for datasets like WinoGround
     images_column_names: str | Sequence[str] = "image"
     texts_column_names: str | Sequence[str] = "caption"
+    abstask_prompt = "Determine the correct match between images and text."
 
     def _calculate_descriptive_statistics_from_split(
         self, split: str, hf_subset: str | None = None, compute_overall: bool = False

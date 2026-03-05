@@ -164,3 +164,32 @@ powermetrics_log.txt
 CLAUDE.md
 
 *.tex
+
+# ===== Local artifacts / outputs =====
+artifacts/
+outputs/
+logs_local/
+runs/
+
+# MTEB run outputs (if generated)
+mteb_results/
+result_test_mteb/
+mteb_results/**
+result_test_mteb/**
+
+# logs / stdout dumps
+*.out
+*.log
+log_*.txt
+logs/
+
+# generated data files
+*.csv
+result.csv
+final_mteb_summary.csv
+
+# misc
+__pycache__/
+*.pyc
+.DS_Store
+local_tools/
