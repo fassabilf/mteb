@@ -76,23 +76,28 @@ os.environ["PYTHONUNBUFFERED"]    = "1"
 # ARGS
 # ==============================================================
 parser = argparse.ArgumentParser(description="Run MIEB eval on a local .pt checkpoint")
-parser.add_argument("--arch",      required=True,  help="open_clip model architecture, e.g. ViT-T-16")
-parser.add_argument("--weights",   required=True,  help="Path to local .pt checkpoint file")
-parser.add_argument("--run-name",  required=True,  help="Name for result output folder (replaces HF repo id)")
-parser.add_argument("--tokenizer", default=None,   help="Tokenizer name passed to open_clip.get_tokenizer(). Defaults to --arch")
-parser.add_argument("--benchmark", default="lite",
+parser.add_argument("--arch",       default=None,  help="open_clip model architecture, e.g. ViT-T-16")
+parser.add_argument("--weights",    default=None,  help="Path to local .pt/.bin checkpoint file")
+parser.add_argument("--config-dir", default=None,  help="Local dir with open_clip_config.json + weights; uses local-dir: loader (ignores --arch/--weights)")
+parser.add_argument("--run-name",   required=True, help="Name for result output folder (replaces HF repo id)")
+parser.add_argument("--tokenizer",  default=None,  help="Tokenizer name passed to open_clip.get_tokenizer(). Defaults to --arch")
+parser.add_argument("--benchmark",  default="lite",
                     choices=["lite", "multilingual"],
                     help="Benchmark to run: 'lite' = MIEB(lite), 'multilingual' = MIEB(Multilingual)")
 parser.add_argument("--task", default=None,
                     help="Run a single task by name, e.g. --task OxfordPets. Overrides --benchmark.")
+parser.add_argument("--task-indices", default=None,
+                    help="Comma-separated 1-based indices from MIEB(lite), e.g. --task-indices 11,12,13")
 args = parser.parse_args()
 
-arch       = args.arch
-weights    = args.weights
-run_name   = args.run_name
-tokenizer  = args.tokenizer or arch
-benchmark  = args.benchmark
+arch        = args.arch
+weights     = args.weights
+config_dir  = args.config_dir
+run_name    = args.run_name
+tokenizer   = args.tokenizer or arch
+benchmark   = args.benchmark
 single_task = args.task
+task_indices = [int(x) for x in args.task_indices.split(",")] if args.task_indices else None
 
 BENCHMARK_MAP = {
     "lite":          "MIEB(lite)",
@@ -172,24 +177,35 @@ class LocalOpenCLIPModel(AbsEncoder):
 
     def __init__(
         self,
-        arch: str,
-        weights_path: str,
-        tokenizer_name: str,
+        arch: str | None,
+        weights_path: str | None,
+        tokenizer_name: str | None,
         run_name: str,
+        config_dir: str | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         import open_clip
 
         self.device = device
 
-        print(f"Loading model arch={arch!r} from {weights_path!r} ...")
-        self.model, _, self.img_preprocess = open_clip.create_model_and_transforms(
-            arch, pretrained=weights_path, device=device
-        )
+        if config_dir:
+            print(f"Loading model from local-dir: {config_dir!r} ...")
+            self.model, _, self.img_preprocess = open_clip.create_model_and_transforms(
+                f"local-dir:{config_dir}", device=device
+            )
+        else:
+            print(f"Loading model arch={arch!r} from {weights_path!r} ...")
+            self.model, _, self.img_preprocess = open_clip.create_model_and_transforms(
+                arch, pretrained=weights_path, device=device
+            )
         self.model.eval()
 
-        print(f"Loading tokenizer {tokenizer_name!r} ...")
-        self.tokenizer = open_clip.get_tokenizer(tokenizer_name)
+        if config_dir:
+            print(f"Loading tokenizer from local dir {config_dir!r} ...")
+            self.tokenizer = open_clip.get_tokenizer(f"local-dir:{config_dir}")
+        else:
+            print(f"Loading tokenizer {tokenizer_name!r} ...")
+            self.tokenizer = open_clip.get_tokenizer(tokenizer_name)
 
         self.embed_dim: int = _detect_embed_dim(self.model, self.device)
         self.context_length: int = getattr(self.model, "context_length", 77)
@@ -334,11 +350,17 @@ model = LocalOpenCLIPModel(
     weights_path=weights,
     tokenizer_name=tokenizer,
     run_name=run_name,
+    config_dir=config_dir,
 )
 
 if single_task:
     print(f"Loading single task: {single_task} ...")
     tasks = mteb.get_tasks(tasks=[single_task])
+elif task_indices:
+    benchmark_name = BENCHMARK_MAP[benchmark]
+    all_tasks = list(mteb.get_benchmark(benchmark_name))
+    tasks = [all_tasks[i - 1] for i in task_indices]  # 1-based
+    print(f"Running task indices {task_indices}: {[t.metadata.name for t in tasks]}")
 else:
     benchmark_name = BENCHMARK_MAP[benchmark]
     print(f"Loading benchmark: {benchmark_name} ...")
@@ -402,7 +424,8 @@ for task in tasks:
 # ==============================================================
 elapsed = time.time() - t0
 print(f"\n{'='*60}")
-print(f"Finished {run_name!r} ({benchmark_name}) in {elapsed/3600:.2f} hours")
+_bname = locals().get("benchmark_name", benchmark)
+print(f"Finished {run_name!r} ({_bname}) in {elapsed/3600:.2f} hours")
 print(f"  Completed : {len(completed)}")
 print(f"  Failed    : {len(failed)}")
 if failed:
