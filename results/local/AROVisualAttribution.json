@@ -1,0 +1,21 @@
+{
+  "dataset_revision": "25fe9b460426ff67cdb0608a737c94f8f49a901e",
+  "task_name": "AROVisualAttribution",
+  "mteb_version": "2.8.0",
+  "scores": {
+    "test": [
+      {
+        "image_acc": 0.0,
+        "text_acc": 0.489982,
+        "accuracy": 0.0,
+        "main_score": 0.489982,
+        "hf_subset": "default",
+        "languages": [
+          "eng-Latn"
+        ]
+      }
+    ]
+  },
+  "evaluation_time": 267.65588116645813,
+  "kg_co2_emissions": null
+}

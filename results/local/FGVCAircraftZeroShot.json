@@ -1,0 +1,19 @@
+{
+  "dataset_revision": "2d33d00400099b87bfec8b04f2876fb10ca07487",
+  "task_name": "FGVCAircraftZeroShot",
+  "mteb_version": "2.8.0",
+  "scores": {
+    "test": [
+      {
+        "accuracy": 0.027903,
+        "main_score": 0.027903,
+        "hf_subset": "default",
+        "languages": [
+          "eng-Latn"
+        ]
+      }
+    ]
+  },
+  "evaluation_time": 83.64974164962769,
+  "kg_co2_emissions": null
+}

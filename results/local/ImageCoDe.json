@@ -1,0 +1,21 @@
+{
+  "dataset_revision": "0a27b28e13841897d490a40fb88a003f04d7e314",
+  "task_name": "ImageCoDe",
+  "mteb_version": "2.8.0",
+  "scores": {
+    "test": [
+      {
+        "image_acc": 0.110339,
+        "text_acc": 0.0,
+        "accuracy": 0.0,
+        "main_score": 0.110339,
+        "hf_subset": "default",
+        "languages": [
+          "eng-Latn"
+        ]
+      }
+    ]
+  },
+  "evaluation_time": 133.93305492401123,
+  "kg_co2_emissions": null
+}
