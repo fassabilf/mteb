@@ -63,10 +63,11 @@ dataclasses.field  = _safe_field
 # ==============================================================
 # OFFLINE MODE
 # ==============================================================
-cache_dir = "/project/lt200394-thllmV/benchmark/.cache/huggingface"
+_default_cache = "/project/lt200394-thllmV/benchmark/.cache/huggingface"
+cache_dir = os.environ.get("HF_HOME", _default_cache)
 os.environ["HF_HOME"]             = cache_dir
-os.environ["HF_DATASETS_CACHE"]   = f"{cache_dir}/datasets"
-os.environ["HF_HUB_CACHE"]        = f"{cache_dir}/hub"
+os.environ["HF_DATASETS_CACHE"]   = os.environ.get("HF_DATASETS_CACHE", f"{cache_dir}/datasets")
+os.environ["HF_HUB_CACHE"]        = os.environ.get("HF_HUB_CACHE",      f"{cache_dir}/hub")
 os.environ["HF_HUB_OFFLINE"]      = os.environ.get("HF_HUB_OFFLINE", "0")
 os.environ["HF_DATASETS_OFFLINE"] = os.environ.get("HF_DATASETS_OFFLINE", "0")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
