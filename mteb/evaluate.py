@@ -338,9 +338,9 @@ def evaluate(
             {"show_progress_bar": False} if show_progress_bar is False else {}
         )
     if "batch_size" not in encode_kwargs:
-        encode_kwargs["batch_size"] = 32
+        encode_kwargs["batch_size"] = 256
         logger.info(
-            "No batch size defined in encode_kwargs. Setting `encode_kwargs['batch_size'] = 32`. Explicitly set the batch size to silence this message."
+            "No batch size defined in encode_kwargs. Setting `encode_kwargs['batch_size'] = 256`. Explicitly set the batch size to silence this message."
         )
 
     model, meta, model_name, model_revision = _sanitize_model(model)

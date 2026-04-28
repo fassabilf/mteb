@@ -120,6 +120,9 @@ if TYPE_CHECKING:
 # ==============================================================
 # HELPERS (mirrored from openclip_models.py)
 # ==============================================================
+_NUM_WORKERS = 4
+
+
 def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     if not batch:
         return {}
@@ -129,7 +132,12 @@ def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     collated: dict[str, Any] = {}
     for key in elem:
         values = [d[key] for d in batch]
-        if key in ("image", "img", "visual") or any(v is None for v in values):
+        if key in ("image", "img", "visual"):
+            if values and isinstance(values[0], torch.Tensor):
+                collated[key] = torch.stack(values)
+            else:
+                collated[key] = values
+        elif any(v is None for v in values):
             collated[key] = values
         else:
             try:
@@ -137,6 +145,28 @@ def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
             except Exception:
                 collated[key] = values
     return collated
+
+
+class _TransformDataset(torch.utils.data.Dataset):
+    """Applies img_preprocess inside __getitem__ so DataLoader workers parallelize it."""
+
+    def __init__(self, dataset, preprocess):
+        self._dataset = dataset
+        self._preprocess = preprocess
+
+    def __len__(self):
+        return len(self._dataset)
+
+    def __getitem__(self, idx):
+        item = dict(self._dataset[idx])
+        for key in ("image", "img", "visual"):
+            if key in item and item[key] is not None:
+                item[key] = self._preprocess(item[key].convert("RGB"))
+        return item
+
+    @property
+    def features(self):
+        return self._dataset.features
 
 
 def _detect_embed_dim(model, device: str) -> int:
@@ -237,15 +267,20 @@ class LocalOpenCLIPModel(AbsEncoder):
         print(f"Model loaded. embed_dim={self.embed_dim}, context_length={self.context_length}")
 
     def _create_dataloader(self, inputs: Any, batch_size: int) -> DataLoader:
-        if isinstance(inputs, DataLoader):
-            return DataLoader(
-                inputs.dataset,
-                batch_size=batch_size or inputs.batch_size,
-                collate_fn=_collate_fn,
-                shuffle=False,
-                num_workers=inputs.num_workers,
-            )
-        return DataLoader(inputs, batch_size=batch_size, collate_fn=_collate_fn, shuffle=False)
+        pin = torch.cuda.is_available()
+        dataset = inputs.dataset if isinstance(inputs, DataLoader) else inputs
+        bs = (batch_size or inputs.batch_size) if isinstance(inputs, DataLoader) else batch_size
+        dataset = _TransformDataset(dataset, self.img_preprocess)
+        return DataLoader(
+            dataset,
+            batch_size=bs,
+            collate_fn=_collate_fn,
+            shuffle=False,
+            num_workers=_NUM_WORKERS,
+            pin_memory=pin,
+            prefetch_factor=2,
+            persistent_workers=True,
+        )
 
     def get_text_embeddings(self, texts: DataLoader, show_progress_bar: bool = True, **kwargs: Any):
         all_text_embeddings = []
@@ -268,7 +303,7 @@ class LocalOpenCLIPModel(AbsEncoder):
                         tokens = tokens.input_ids
                     if tokens.shape[1] > self.context_length:
                         tokens = tokens[:, :self.context_length]
-                    text_out = self.model.encode_text(tokens.to(self.device))
+                    text_out = self.model.encode_text(tokens.to(self.device, non_blocking=True))
                     for idx, vi in enumerate(valid_indices):
                         batch_emb[vi] = text_out[idx]
 
@@ -285,15 +320,22 @@ class LocalOpenCLIPModel(AbsEncoder):
             for batch in tqdm(images, disable=not show_progress_bar, desc="Image Encoding"):
                 batch_images = batch["image"]
 
+                # _TransformDataset pre-processed images are already tensors stacked by collate_fn
+                if isinstance(batch_images, torch.Tensor):
+                    img_tensor = batch_images.to(self.device, non_blocking=True)
+                    image_out = self.model.encode_image(img_tensor)
+                    all_image_embeddings.append(image_out.cpu())
+                    continue
+
+                # Fallback: raw PIL images
                 valid_indices = [i for i, img in enumerate(batch_images) if img is not None]
                 valid_images = [batch_images[i].convert("RGB") for i in valid_indices]
 
                 batch_emb = torch.zeros(len(batch_images), self.embed_dim, device=self.device)
-
                 if valid_images:
-                    img_tensor = torch.vstack(
-                        [self.img_preprocess(img).unsqueeze(0) for img in valid_images]
-                    ).to(self.device)
+                    img_tensor = torch.stack(
+                        [self.img_preprocess(img) for img in valid_images]
+                    ).to(self.device, non_blocking=True)
                     image_out = self.model.encode_image(img_tensor)
                     for idx, vi in enumerate(valid_indices):
                         batch_emb[vi] = image_out[idx]
@@ -314,7 +356,7 @@ class LocalOpenCLIPModel(AbsEncoder):
         prompt_type=None,
         **kwargs: Any,
     ):
-        loader = self._create_dataloader(inputs, batch_size=kwargs.get("batch_size", 32))
+        loader = self._create_dataloader(inputs, batch_size=kwargs.get("batch_size", 256))
 
         text_embeddings = None
         image_embeddings = None

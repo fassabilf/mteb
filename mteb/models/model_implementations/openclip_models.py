@@ -34,10 +34,13 @@ SIGLIP_TIMM_CITATION = """@misc{zhai2023sigmoid,
 }"""
 
 
+_NUM_WORKERS = 4
+
+
 def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Custom collate that handles sparse batches containing None values or PIL images.
-    Image keys and any key with None values are kept as plain Python lists.
+    Image keys with pre-processed tensors are stacked; PIL/None values stay as lists.
     Everything else falls back to default_collate.
     """
     if not batch:
@@ -50,7 +53,13 @@ def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     collated: dict[str, Any] = {}
     for key in elem:
         values = [d[key] for d in batch]
-        if key in ("image", "img", "visual") or any(v is None for v in values):
+        if key in ("image", "img", "visual"):
+            # Stack pre-processed tensors; keep PIL / None as list
+            if values and isinstance(values[0], torch.Tensor):
+                collated[key] = torch.stack(values)
+            else:
+                collated[key] = values
+        elif any(v is None for v in values):
             collated[key] = values
         else:
             try:
@@ -58,6 +67,32 @@ def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
             except Exception:
                 collated[key] = values
     return collated
+
+
+class _TransformDataset(torch.utils.data.Dataset):
+    """Wraps an HF / torch Dataset and applies img_preprocess inside __getitem__.
+
+    Running the transform here lets DataLoader worker processes do it in parallel,
+    so the GPU doesn't stall waiting for CPU image decoding/resizing.
+    """
+
+    def __init__(self, dataset, preprocess):
+        self._dataset = dataset
+        self._preprocess = preprocess
+
+    def __len__(self):
+        return len(self._dataset)
+
+    def __getitem__(self, idx):
+        item = dict(self._dataset[idx])
+        for key in ("image", "img", "visual"):
+            if key in item and item[key] is not None:
+                item[key] = self._preprocess(item[key].convert("RGB"))
+        return item
+
+    @property
+    def features(self):
+        return self._dataset.features
 
 
 def _build_hf_hub_name(model_name: str) -> str:
@@ -202,20 +237,20 @@ def openclip_loader(model_name, **kwargs):
 
         # ------------------------------------------------------------------
         def _create_dataloader(self, inputs: Any, batch_size: int) -> DataLoader:
-            """Re-wrap an existing DataLoader (or Dataset) with _collate_fn."""
-            if isinstance(inputs, DataLoader):
-                return DataLoader(
-                    inputs.dataset,
-                    batch_size=batch_size or inputs.batch_size,
-                    collate_fn=_collate_fn,
-                    shuffle=False,
-                    num_workers=inputs.num_workers,
-                )
+            """Re-wrap an existing DataLoader (or Dataset) with parallel workers."""
+            pin = torch.cuda.is_available()
+            dataset = inputs.dataset if isinstance(inputs, DataLoader) else inputs
+            bs = (batch_size or inputs.batch_size) if isinstance(inputs, DataLoader) else batch_size
+            dataset = _TransformDataset(dataset, self.img_preprocess)
             return DataLoader(
-                inputs,
-                batch_size=batch_size,
+                dataset,
+                batch_size=bs,
                 collate_fn=_collate_fn,
                 shuffle=False,
+                num_workers=_NUM_WORKERS,
+                pin_memory=pin,
+                prefetch_factor=2,
+                persistent_workers=True,
             )
 
         def get_text_embeddings(
@@ -248,10 +283,9 @@ def openclip_loader(model_name, **kwargs):
                         tokens = self.tokenizer(valid_texts)
                         if not isinstance(tokens, torch.Tensor):
                             tokens = tokens.input_ids
-                        # --- FIX 2b: truncate tokens to model context_length ---
                         if tokens.shape[1] > self.context_length:
                             tokens = tokens[:, : self.context_length]
-                        text_out = self.model.encode_text(tokens.to(self.device))
+                        text_out = self.model.encode_text(tokens.to(self.device, non_blocking=True))
                         for idx, vi in enumerate(valid_indices):
                             batch_emb[vi] = text_out[idx]
 
@@ -275,23 +309,22 @@ def openclip_loader(model_name, **kwargs):
                 ):
                     batch_images = batch["image"]
 
-                    # Identify which items actually have an image
-                    valid_indices = [
-                        i for i, img in enumerate(batch_images) if img is not None
-                    ]
-                    valid_images = [
-                        batch_images[i].convert("RGB") for i in valid_indices
-                    ]
+                    # _TransformDataset already produced tensors stacked by collate_fn
+                    if isinstance(batch_images, torch.Tensor):
+                        img_tensor = batch_images.to(self.device, non_blocking=True)
+                        image_out = self.model.encode_image(img_tensor)
+                        all_image_embeddings.append(image_out.cpu())
+                        continue
 
-                    # Start with a zero-vector batch; fill in valid slots
-                    batch_emb = torch.zeros(
-                        len(batch_images), self.embed_dim, device=self.device
-                    )
+                    # Fallback: raw PIL images (e.g. DataLoader not wrapped)
+                    valid_indices = [i for i, img in enumerate(batch_images) if img is not None]
+                    valid_images = [batch_images[i].convert("RGB") for i in valid_indices]
 
+                    batch_emb = torch.zeros(len(batch_images), self.embed_dim, device=self.device)
                     if valid_images:
-                        img_tensor = torch.vstack(
-                            [self.img_preprocess(img).unsqueeze(0) for img in valid_images]
-                        ).to(self.device)
+                        img_tensor = torch.stack(
+                            [self.img_preprocess(img) for img in valid_images]
+                        ).to(self.device, non_blocking=True)
                         image_out = self.model.encode_image(img_tensor)
                         for idx, vi in enumerate(valid_indices):
                             batch_emb[vi] = image_out[idx]
@@ -313,7 +346,7 @@ def openclip_loader(model_name, **kwargs):
             **kwargs: Any,
         ) -> Array:
             loader = self._create_dataloader(
-                inputs, batch_size=kwargs.get("batch_size", 32)
+                inputs, batch_size=kwargs.get("batch_size", 256)
             )
 
             text_embeddings = None
