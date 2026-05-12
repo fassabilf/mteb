@@ -89,6 +89,12 @@ parser.add_argument("--task", default=None,
                     help="Run a single task by name, e.g. --task OxfordPets. Overrides --benchmark.")
 parser.add_argument("--task-indices", default=None,
                     help="Comma-separated 1-based indices from MIEB(lite), e.g. --task-indices 11,12,13")
+parser.add_argument("--batch-size", type=int, default=256,
+                    help="Batch size for image/text encoding (default: 256)")
+parser.add_argument("--num-workers", type=int, default=4,
+                    help="DataLoader num_workers (default: 4)")
+parser.add_argument("--reverse", action="store_true",
+                    help="Reverse task order (run from last to first)")
 args = parser.parse_args()
 
 arch        = args.arch
@@ -121,7 +127,7 @@ if TYPE_CHECKING:
 # ==============================================================
 # HELPERS (mirrored from openclip_models.py)
 # ==============================================================
-_NUM_WORKERS = 4
+_NUM_WORKERS = args.num_workers
 
 
 def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
@@ -357,7 +363,7 @@ class LocalOpenCLIPModel(AbsEncoder):
         prompt_type=None,
         **kwargs: Any,
     ):
-        loader = self._create_dataloader(inputs, batch_size=kwargs.get("batch_size", 256))
+        loader = self._create_dataloader(inputs, batch_size=kwargs.get("batch_size", args.batch_size))
 
         text_embeddings = None
         image_embeddings = None
@@ -409,6 +415,12 @@ else:
     print(f"Loading benchmark: {benchmark_name} ...")
     tasks = mteb.get_benchmark(benchmark_name)
 
+if args.reverse:
+    tasks = list(reversed(list(tasks)))
+    print(f"Task order reversed.")
+
+_ENCODE_KWARGS = {"batch_size": args.batch_size}
+
 # ==============================================================
 # RUN TASK BY TASK
 # ==============================================================
@@ -428,6 +440,7 @@ for task in tasks:
                 mteb.evaluate(
                     model=model, tasks=[sub], raise_error=False,
                     overwrite_strategy="only-missing", show_progress_bar=True,
+                    encode_kwargs=_ENCODE_KWARGS,
                 )
                 print(f"    ✓ {sub_name} done")
             except Exception as e:
@@ -448,6 +461,7 @@ for task in tasks:
         mteb.evaluate(
             model=model, tasks=[task],
             overwrite_strategy="only-missing", show_progress_bar=True,
+            encode_kwargs=_ENCODE_KWARGS,
         )
         print(f"  ✓ {task_name} done")
         completed.append(task_name)

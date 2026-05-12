@@ -5,23 +5,17 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -t 25:00:00
 #SBATCH -A lt200394
-#SBATCH --array=1-6
-#SBATCH -J mieb_local_v3
-#SBATCH -o /project/lt200394-thllmV/benchmark/mteb/logs/mieb_local_v3_%A_%a.out
+#SBATCH -J mieb_mopup_v3
+#SBATCH -o /project/lt200394-thllmV/benchmark/mteb/logs/mieb_mopup_v3_%j.out
 
 ARCH="ViT-T-16"
 WEIGHTS="/project/lt200394-thllmV/multilingual-clip-kd/open_clip/experiments/siglip2_kd/clipkd_ViT-T-16_from_ViT-B-16-SigLIP2_v3/checkpoints/epoch_100.pt"
 RUN_NAME="clipkd-ViT-T-16-from-SigLIP2-v3"
 BENCHMARK="lite"
-N_JOBS=6
-N_TASKS=51
 
-# Compute this job's task index range (1-based)
-TASKS_PER_JOB=$(( (N_TASKS + N_JOBS - 1) / N_JOBS ))
-START=$(( (SLURM_ARRAY_TASK_ID - 1) * TASKS_PER_JOB + 1 ))
-END=$(( SLURM_ARRAY_TASK_ID * TASKS_PER_JOB ))
-if [ $END -gt $N_TASKS ]; then END=$N_TASKS; fi
-INDICES=$(seq -s, $START $END)
+# 9 missing tasks (indices 1-based), run in reverse so we go 51→39
+# while jobs 5&6 are going 39→51 — both meet in the middle faster
+INDICES="39,41,42,43,44,45,49,50,51"
 
 export HF_HOME="/project/lt200394-thllmV/benchmark/.cache/huggingface"
 export HF_DATASETS_CACHE="${HF_HOME}/datasets"
@@ -40,4 +34,5 @@ python3 eval_mieb_local.py \
     --benchmark    "$BENCHMARK" \
     --task-indices "$INDICES" \
     --batch-size   2048 \
-    --num-workers  4
+    --num-workers  4 \
+    --reverse
